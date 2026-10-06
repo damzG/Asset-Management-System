@@ -12,12 +12,30 @@ FetchContent_Declare(
         GIT_TAG 5.5
         GIT_SHALLOW TRUE
 )
-FetchContent_MakeAvailable(raylib)
 
-add_executable(${PROJECT_NAME} main.c)
+# raygui is a single header; it has no CMake project, so we only download it
+FetchContent_Declare(
+        raygui
+        GIT_REPOSITORY https://github.com/raysan5/raygui.git
+        GIT_TAG 4.0
+        GIT_SHALLOW TRUE
+)
+
+FetchContent_MakeAvailable(raylib raygui)
+
+add_executable(${PROJECT_NAME}
+        main.c
+        ui.c
+        store.c
+        Ui.c
+        Ui.c
+        Ui.h
+        Ui.h
+        Store.c
+        Store.c
+        Store.h
+        Models.h
+)
+
+target_include_directories(${PROJECT_NAME} PRIVATE ${raygui_SOURCE_DIR}/src)
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib)
-
-# Windows: no console window in release builds (optional)
-# if (WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
-#     target_link_options(${PROJECT_NAME} PRIVATE -mwindows)
-# endif()
