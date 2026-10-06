@@ -12,8 +12,8 @@
 
 void   store_init_placeholder(void);   /* fills a few sample rows */
 int    store_count(void);
-Asset *store_get(int index);           /* NULL if index is out of range */
-int    store_add(const Asset *asset);  /* returns new id, or -1 if full */
+int *store_get(int index);           /* NULL if index is out of range */
+int    store_add(const int *asset);  /* returns new id, or -1 if full */
 void   store_remove_by_id(int id);
 
 #endif
