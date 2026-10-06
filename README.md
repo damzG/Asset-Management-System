@@ -573,15 +573,15 @@ Through the development of this project, the following programming and software 
 
 # Contributors
 
-**Developer:** [Your Name]
+**Developer:** Oyindamola Olaosun, Owen Nathanael
 
-**Student Number:** [Student Number]
+**Student Number:** C003131475, C00313648
 
-**Course:** [Course Name]
+**Course:** Advanced Programming
 
-**Module:** [Module Name]
+**Module:** Software Development
 
-**Institution:** [Institution Name]
+**Institution:** South East Technological Univerrsity
 
 ---
 
