@@ -3,8 +3,10 @@
 //
 #include "store.h"
 #include <string.h>
+#include <stddef.h>
 
-static int assets[MAX_ASSETS];
+
+static Asset assets[MAX_ASSETS];
 static int   count  = 0;
 static int   nextId = 1;
 
