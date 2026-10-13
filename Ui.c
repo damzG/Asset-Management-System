@@ -143,7 +143,7 @@ static void draw_dashboard(Rectangle area)
     int values[4] = { store_count(), counts[STATUS_IN_USE], counts[STATUS_IN_STORAGE], counts[STATUS_REPAIR] };
 
     float gap = 20.0f;
-    float cardW = (area.width - 3 * gap) / 4.0f;
+    float cardW = (area.width - (3 * gap)) / 4.0f;
 
     for (int i = 0; i < 4; i++) {
         Rectangle c = { area.x + i * (cardW + gap), area.y + 60, cardW, 110 };
@@ -152,7 +152,38 @@ static void draw_dashboard(Rectangle area)
         DrawText(TextFormat("%d", values[i]), (int)c.x + 20, (int)c.y + 55, 40, COL_ACCENT);
     }
 
-    DrawText("Charts and recent activity can go here later.", (int)area.x, (int)area.y + 200, 20, COL_MUTED);
+    /* --- Recent Additions Section --- */
+    float sectionY = area.y + 195;
+    DrawText("Recent Additions", (int)area.x, (int)sectionY, 22, COL_TEXT);
+
+    Rectangle recentPanel = { area.x, sectionY + 35, area.width, 210 };
+    DrawRectangleRounded(recentPanel, 0.04f, 8, WHITE);
+
+    int total = store_count();
+    if (total == 0) {
+        DrawText("No assets added yet.", (int)recentPanel.x + 20, (int)recentPanel.y + 30, 20, COL_MUTED);
+    } else {
+        // Table header inside the panel
+        float hY = recentPanel.y + 18;
+        DrawText("Name", (int)recentPanel.x + 20, (int)hY, 16, COL_MUTED);
+        DrawText("Category", (int)recentPanel.x + 280, (int)hY, 16, COL_MUTED);
+        DrawText("Status", (int)recentPanel.x + 500, (int)hY, 16, COL_MUTED);
+
+        hY += 24;
+        DrawLine((int)recentPanel.x + 20, (int)hY, (int)(recentPanel.x + recentPanel.width - 20), (int)hY, (Color){ 226, 232, 240, 255 });
+
+        // Show up to 4 most recent additions (looping backwards from the end of the store)
+        int showCount = total < 4 ? total : 4;
+        for (int i = 0; i < showCount; i++) {
+            Asset *a = store_get(total - 1 - i);
+            if (!a) break;
+
+            int rowY = (int)hY + 12 + (i * 34);
+            draw_text_fit(a->name, recentPanel.x + 20, (float)rowY, 240, 18, COL_TEXT);
+            draw_text_fit(a->category, recentPanel.x + 280, (float)rowY, 190, 18, COL_MUTED);
+            DrawText(STATUS_NAMES[a->status], (int)recentPanel.x + 500, rowY, 18, STATUS_COLORS[a->status]);
+        }
+    }
 }
 
 /* ---------- asset list ---------- */
@@ -163,8 +194,8 @@ static void draw_assets(Rectangle area)
     /* toolbar */
     float toolbarY = area.y + 50;
     Rectangle searchBox = { area.x, toolbarY, 240, 36 };
-    Rectangle addBtn    = { area.x + area.width - 150, toolbarY, 150, 36 };
-    Rectangle delBtn    = { addBtn.x - 170, toolbarY, 160, 36 };
+    Rectangle addBtn    = { area.x + area.width - 325, toolbarY, 150, 36 };
+    Rectangle delBtn    = { area.x + area.width - 160, toolbarY, 160, 36 };
 
     if (GuiTextBox(searchBox, searchText, (int)sizeof(searchText), searchEditing))
         searchEditing = !searchEditing;
@@ -185,7 +216,7 @@ static void draw_assets(Rectangle area)
     GuiEnable();
 
     /* table geometry */
-    Rectangle table = { area.x, toolbarY + 52, area.width, area.y + area.height - (toolbarY + 52) };
+    Rectangle table = { area.x, toolbarY + 52, area.width, area.height - (toolbarY + 52 - area.y) };
     Rectangle body  = { table.x, table.y + ROW_H, table.width, table.height - ROW_H };
 
     float colW[5];
@@ -194,6 +225,7 @@ static void draw_assets(Rectangle area)
     colW[2] = table.width * 0.16f;
     colW[3] = table.width * 0.22f;
     colW[4] = table.width - colW[0] - colW[1] - colW[2] - colW[3];
+
     float colX[5];
     colX[0] = table.x;
     for (int i = 1; i < 5; i++) colX[i] = colX[i - 1] + colW[i - 1];
@@ -322,9 +354,10 @@ void ui_update_and_draw(void)
     ClearBackground(COL_BG);
 
     Rectangle area = {
-        SIDEBAR_W + PAD, PAD,
-        (float)GetScreenWidth()  - SIDEBAR_W - 2 * PAD,
-        (float)GetScreenHeight() - 2 * PAD
+        SIDEBAR_W + PAD,
+        PAD,
+        (float)GetScreenWidth()  - SIDEBAR_W - (2 * PAD),
+        (float)GetScreenHeight() - (2 * PAD)
     };
 
     switch (currentScreen) {
