@@ -1,5 +1,5 @@
 #include "raylib.h"
-#include "ui.h"
+#include "Ui.h"
 
 // Define a modern slate dark-mode background color (Hex: 0xRRGGBBAA)
 #define COLOR_BACKGROUND GetColor(0x1E1E2EFF)

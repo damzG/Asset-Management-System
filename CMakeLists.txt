@@ -25,13 +25,8 @@ FetchContent_MakeAvailable(raylib raygui)
 
 add_executable(${PROJECT_NAME}
         main.c
-        ui.c
-        store.c
-        Ui.c
         Ui.c
         Ui.h
-        Ui.h
-        Store.c
         Store.c
         Store.h
         Models.h
