@@ -14,6 +14,7 @@ A desktop-based **Asset Management System** developed in **C programming languag
 * [Installation](#installation)
 * [Building the Project](#building-the-project)
 * [Running the Application](#running-the-application)
+* [Screenshots](#screenshots)
 * [How to Use](#how-to-use)
 * [Asset Management](#asset-management)
 * [Data Storage](#data-storage)
@@ -244,6 +245,10 @@ AssetManagementSystem.exe
 ```
 
 ---
+# Screenshots
+<img width="500" height="700" alt="Screenshot 2026-10-16 141123" src="https://github.com/user-attachments/assets/7c405cf7-ea3e-4f74-bd00-2c4d4906837e" />
+<img width="500" height="700" alt="Screenshot 2026-10-16 141144" src="https://github.com/user-attachments/assets/feb8d3d2-1714-469c-9178-6b1538674e22" />
+<img width="500" height="700" alt="Screenshot 2026-10-16 141201" src="https://github.com/user-attachments/assets/8b645b84-0f68-4e01-9d48-3b14673fe974" />
 
 # How to Use
 
@@ -596,5 +601,5 @@ This project was developed for **educational purposes**.
 # Acknowledgements
 
 * **Raylib** — for providing the graphics and game development library used to create the application's graphical interface.
-* **[College/University Name]** — for providing the learning environment and project requirements.
+* **South East Technological University** — for providing the learning environment and project requirements.
 * **AI development tools** — for providing assistance with research, debugging, programming concepts, and documentation.
