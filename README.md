@@ -246,9 +246,9 @@ AssetManagementSystem.exe
 
 ---
 # Screenshots
-<img width="500" height="700" alt="Screenshot 2026-10-16 141123" src="https://github.com/user-attachments/assets/7c405cf7-ea3e-4f74-bd00-2c4d4906837e" />
-<img width="500" height="700" alt="Screenshot 2026-10-16 141144" src="https://github.com/user-attachments/assets/feb8d3d2-1714-469c-9178-6b1538674e22" />
-<img width="500" height="700" alt="Screenshot 2026-10-16 141201" src="https://github.com/user-attachments/assets/8b645b84-0f68-4e01-9d48-3b14673fe974" />
+<img width="1000" height="800" alt="Screenshot 2026-10-16 141123" src="https://github.com/user-attachments/assets/7c405cf7-ea3e-4f74-bd00-2c4d4906837e" />
+<img width="1000" height="800" alt="Screenshot 2026-10-16 141144" src="https://github.com/user-attachments/assets/feb8d3d2-1714-469c-9178-6b1538674e22" />
+<img width="1000" height="800" alt="Screenshot 2026-10-16 141201" src="https://github.com/user-attachments/assets/8b645b84-0f68-4e01-9d48-3b14673fe974" />
 
 # How to Use
 
