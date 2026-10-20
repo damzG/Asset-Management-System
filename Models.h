@@ -5,6 +5,8 @@
 #ifndef ASSET_MANAGEMENT_SYSTEM_MODELS_H
 #define ASSET_MANAGEMENT_SYSTEM_MODELS_H
 
+#include <time.h>
+
 #define MAX_ASSETS 100
 #define NAME_LEN   100
 #define SHORT_LEN  50
@@ -23,6 +25,7 @@ typedef struct {
     char category[SHORT_LEN];
     char assignedTo[SHORT_LEN];
     AssetStatus status;
+    time_t deadline;      /* end of the due date (local time); 0 = no deadline */
 } Asset;
 
 #endif // ASSET_MANAGEMENT_SYSTEM_MODELS_H

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <time.h>
 
 static Asset assets[MAX_ASSETS];
 static int   count  = 0;
@@ -64,8 +65,79 @@ void store_remove_by_id(int id)
     }
 }
 
+/* ---------- deadline helpers ---------- */
+bool store_parse_date(const char *s, time_t *out)
+{
+    int y, m, d, used = 0;
+    if (sscanf(s, "%d-%d-%d%n", &y, &m, &d, &used) != 3) return false;
+    while (s[used] == ' ') used++;
+    if (s[used] != '\0') return false;
+    if (y < 2000 || y > 2100) return false;
+
+    struct tm t;
+    memset(&t, 0, sizeof(t));
+    t.tm_year = y - 1900;
+    t.tm_mon  = m - 1;
+    t.tm_mday = d;
+    t.tm_hour = 23; t.tm_min = 59; t.tm_sec = 59;   /* a deadline lasts until the end of the day */
+    t.tm_isdst = -1;
+
+    time_t r = mktime(&t);
+    /* mktime silently rolls 2026-02-30 into March, so check nothing was changed */
+    if (r == (time_t)-1 || t.tm_year != y - 1900 || t.tm_mon != m - 1 || t.tm_mday != d) return false;
+
+    *out = r;
+    return true;
+}
+
+void store_format_date(time_t t, char *buf, size_t n)
+{
+    if (t == 0) { if (n) buf[0] = '\0'; return; }
+    struct tm *lt = localtime(&t);
+    if (!lt || strftime(buf, n, "%Y-%m-%d", lt) == 0) { if (n) buf[0] = '\0'; }
+}
+
+Urgency store_urgency(const Asset *a, time_t now)
+{
+    if (a->deadline == 0) return URGENCY_NONE;
+    double left = difftime(a->deadline, now);
+    if (left < 0) return URGENCY_OVERDUE;
+    if (left <= DEADLINE_SOON_DAYS * 86400.0) return URGENCY_SOON;
+    return URGENCY_OK;
+}
+
+void store_countdown_text(const Asset *a, time_t now, char *buf, size_t n)
+{
+    if (a->deadline == 0) { snprintf(buf, n, "-"); return; }
+
+    long secs = (long)difftime(a->deadline, now);
+    bool over = secs < 0;
+    if (over) secs = -secs;
+
+    long d = secs / 86400, h = (secs % 86400) / 3600, m = (secs % 3600) / 60;
+    char span[32];
+    if (d > 0)      snprintf(span, sizeof(span), "%ldd %ldh", d, h);
+    else if (h > 0) snprintf(span, sizeof(span), "%ldh %ldm", h, m);
+    else            snprintf(span, sizeof(span), "%ldm", m);
+
+    snprintf(buf, n, over ? "%s overdue" : "%s left", span);
+}
+
 /* ---------- sample data ---------- */
-static void seed(const char *name, const char *category, const char *who, AssetStatus status)
+#define NO_DEADLINE 9999
+
+/* End of the day that is `days` from today (negative = in the past). */
+static time_t due_in_days(int days)
+{
+    if (days == NO_DEADLINE) return 0;
+    time_t t = time(NULL) + (time_t)days * 86400;
+    struct tm tmv = *localtime(&t);
+    tmv.tm_hour = 23; tmv.tm_min = 59; tmv.tm_sec = 59;
+    tmv.tm_isdst = -1;
+    return mktime(&tmv);
+}
+
+static void seed(const char *name, const char *category, const char *who, AssetStatus status, int dueInDays)
 {
     Asset a;
     memset(&a, 0, sizeof(a));
@@ -73,6 +145,7 @@ static void seed(const char *name, const char *category, const char *who, AssetS
     strncpy(a.category, category, SHORT_LEN - 1);
     strncpy(a.assignedTo, who, SHORT_LEN - 1);
     a.status = status;
+    a.deadline = due_in_days(dueInDays);
     store_add(&a);
 }
 
@@ -80,14 +153,19 @@ void store_init_placeholder(void)
 {
     count = 0;
     nextId = 1;
-    seed("Dell Latitude 5440 Laptop", "Laptop",    "Aoife Murphy", STATUS_IN_USE);
-    seed("HP LaserJet Pro M404",      "Printer",   "Front Office", STATUS_IN_USE);
-    seed("Samsung 27in Monitor",      "Monitor",   "",             STATUS_IN_STORAGE);
-    seed("Cisco Catalyst Switch",     "Network",   "Server Room",  STATUS_IN_USE);
-    seed("iPad Air (10.9in)",         "Tablet",    "Sean Kelly",   STATUS_REPAIR);
-    seed("Logitech Webcam C920",      "Peripheral","",             STATUS_IN_STORAGE);
-    seed("Office Desk (Standing)",    "Furniture", "Niamh Byrne",  STATUS_IN_USE);
-    seed("Projector Epson EB-X49",    "AV",        "",             STATUS_IN_STORAGE);
+    seed("Dell Latitude 5440 Laptop", "Laptop",    "Aoife Murphy", STATUS_IN_USE,     14);
+    seed("HP LaserJet Pro M404",      "Printer",   "Front Office", STATUS_IN_USE,     -2);
+    seed("Samsung 27in Monitor",      "Monitor",   "",             STATUS_IN_STORAGE, NO_DEADLINE);
+    seed("Cisco Catalyst Switch",     "Network",   "Server Room",  STATUS_IN_USE,      2);
+    seed("iPad Air (10.9in)",         "Tablet",    "Sean Kelly",   STATUS_REPAIR,     -5);
+    seed("Logitech Webcam C920",      "Peripheral","",             STATUS_IN_STORAGE, NO_DEADLINE);
+    seed("Office Desk (Standing)",    "Furniture", "Niamh Byrne",  STATUS_IN_USE,     30);
+    seed("Projector Epson EB-X49",    "AV",        "",             STATUS_IN_STORAGE,  0);
+    seed("Lenovo ThinkPad X1 Carbon", "Laptop",    "Declan Walsh", STATUS_IN_USE,     -9);
+    seed("Zebra ZD421 Label Printer", "Printer",   "Warehouse",    STATUS_REPAIR,      1);
+    seed("Meeting Room TV 55in",      "AV",        "Boardroom",    STATUS_IN_USE,      7);
+    seed("Ubiquiti WiFi Access Point","Network",   "",             STATUS_IN_STORAGE, -1);
+    seed("Poly Conference Phone",     "Peripheral","Ciara Doyle",  STATUS_IN_USE,      3);
 }
 
 void store_init(void)
@@ -119,13 +197,13 @@ static void write_field(FILE *f, const char *s)
 }
 
 static void write_row(FILE *f, const char *id, const char *name, const char *cat,
-                      const char *who, const char *status)
+                      const char *who, const char *status, const char *deadline)
 {
     fprintf(f, "%s,", id);
     write_field(f, name);   fputc(',', f);
     write_field(f, cat);    fputc(',', f);
     write_field(f, who);    fputc(',', f);
-    fprintf(f, "%s\n", status);
+    fprintf(f, "%s,%s\n", status, deadline);
 }
 
 bool store_save(const char *path)
@@ -133,12 +211,13 @@ bool store_save(const char *path)
     FILE *f = fopen(path, "w");
     if (!f) return false;
 
-    fprintf(f, "id,name,category,assignedTo,status\n");
+    fprintf(f, "id,name,category,assignedTo,status,deadline\n");
     for (int i = 0; i < count; i++) {
-        char id[16], status[16];
+        char id[16], status[16], due[16];
         snprintf(id, sizeof(id), "%d", assets[i].id);
         snprintf(status, sizeof(status), "%d", (int)assets[i].status);
-        write_row(f, id, assets[i].name, assets[i].category, assets[i].assignedTo, status);
+        store_format_date(assets[i].deadline, due, sizeof(due));
+        write_row(f, id, assets[i].name, assets[i].category, assets[i].assignedTo, status, due);
     }
     return fclose(f) == 0;
 }
@@ -148,12 +227,13 @@ bool store_export_csv(const char *path)
     FILE *f = fopen(path, "w");
     if (!f) return false;
 
-    fprintf(f, "ID,Name,Category,Assigned to,Status\n");
+    fprintf(f, "ID,Name,Category,Assigned to,Status,Deadline\n");
     for (int i = 0; i < count; i++) {
-        char id[16];
+        char id[16], due[16];
         snprintf(id, sizeof(id), "%d", assets[i].id);
+        store_format_date(assets[i].deadline, due, sizeof(due));
         write_row(f, id, assets[i].name, assets[i].category, assets[i].assignedTo,
-                  store_status_name(assets[i].status));
+                  store_status_name(assets[i].status), due);
     }
     return fclose(f) == 0;
 }
@@ -204,8 +284,9 @@ bool store_load(const char *path)
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = '\0';
 
-        char *fields[5];
-        if (parse_csv_line(line, fields, 5) < 5) continue;
+        char *fields[6];
+        int nFields = parse_csv_line(line, fields, 6);
+        if (nFields < 5) continue;             /* 5 columns = older file without deadlines */
 
         int id = atoi(fields[0]);
         if (id <= 0) continue;                 /* skips the header row and junk */
@@ -219,6 +300,10 @@ bool store_load(const char *path)
         strncpy(a.assignedTo, fields[3], SHORT_LEN - 1);
         int st = atoi(fields[4]);
         a.status = (st >= 0 && st < STATUS_COUNT) ? (AssetStatus)st : STATUS_IN_STORAGE;
+
+        time_t due;
+        if (nFields >= 6 && fields[5][0] != '\0' && store_parse_date(fields[5], &due))
+            a.deadline = due;
 
         assets[count++] = a;
         if (id >= nextId) nextId = id + 1;

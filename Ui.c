@@ -10,7 +10,9 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---------- layout ---------- */
 #define SIDEBAR_W 220
@@ -21,7 +23,7 @@
  * Every colour that changes between light and dark mode lives in this struct.
  * Drawing code reads from `T`; apply_theme() fills it in. */
 typedef struct {
-    Color bg, card, sidebar, hover, accent, text, muted, rowAlt, rowSel, line, error;
+    Color bg, card, sidebar, hover, accent, text, muted, rowAlt, rowSel, line, error, warn;
 } Theme;
 
 static Theme T;
@@ -44,7 +46,7 @@ static void apply_theme(bool dark)
             .accent  = {  59, 130, 246, 255 }, .text   = { 241, 245, 249, 255 },
             .muted   = { 148, 163, 184, 255 }, .rowAlt = {  36,  48,  68, 255 },
             .rowSel  = {  30,  64, 120, 255 }, .line   = {  51,  65,  85, 255 },
-            .error   = { 248, 113, 113, 255 }
+            .error   = { 248, 113, 113, 255 }, .warn = { 251, 191,  36, 255 }
         };
     } else {
         T = (Theme){
@@ -53,7 +55,7 @@ static void apply_theme(bool dark)
             .accent  = {  59, 130, 246, 255 }, .text   = {  15,  23,  42, 255 },
             .muted   = { 100, 116, 139, 255 }, .rowAlt = { 248, 250, 252, 255 },
             .rowSel  = { 219, 234, 254, 255 }, .line   = { 226, 232, 240, 255 },
-            .error   = { 220,  38,  38, 255 }
+            .error   = { 220,  38,  38, 255 }, .warn = { 217, 119,   6, 255 }
         };
     }
 
@@ -108,6 +110,19 @@ static Asset draft;
 static int   editingId      = -1;      /* -1 = adding a new asset, otherwise the id being edited */
 static int   activeField    = -1;
 static char  formError[64]  = "";
+static char  deadlineBuf[16] = "";     /* "YYYY-MM-DD" text box in the form */
+
+/* deadlines */
+static time_t nowT = 0;                /* "current time" the whole UI uses (may be simulated) */
+
+/* time-travel clock */
+static const double SPEEDS[] = { -86400, -3600, -60, -10, -1, 0, 1, 10, 60, 3600, 86400 };  /* sim seconds per real second */
+#define SPEED_COUNT  ((int)(sizeof(SPEEDS) / sizeof(SPEEDS[0])))
+#define SPEED_PAUSED 5
+#define SPEED_REAL   6
+static double simT     = 0;            /* simulated epoch seconds */
+static int    speedIdx = SPEED_REAL;
+static int    alertDismissedAt = 0;    /* toast hidden until the overdue count rises above this */
 
 /* settings screen */
 static char dbPathBuf[PATH_LEN]     = "";
@@ -124,6 +139,7 @@ static void reset_draft(void)
     editingId = -1;
     activeField = -1;
     formError[0] = '\0';
+    deadlineBuf[0] = '\0';
 }
 
 /* Saves to the current database file. Call after every add / edit / delete. */
@@ -175,6 +191,137 @@ static void draw_text_fit(const char *text, float x, float y, float maxW, int si
     }
 }
 
+/* ---------- deadline assistant ----------
+ * Rule-based "assistant": finds overdue / due-soon assets, ranks them by how urgent
+ * they are, and suggests a next step based on status and who holds the asset. */
+static Color urgency_color(Urgency u)
+{
+    switch (u) {
+        case URGENCY_OVERDUE: return T.error;
+        case URGENCY_SOON:    return T.warn;
+        case URGENCY_OK:      return STATUS_COLORS[STATUS_IN_USE];
+        default:              return T.muted;
+    }
+}
+
+static int cmp_deadline(const void *a, const void *b)
+{
+    time_t da = store_get(*(const int *)a)->deadline;
+    time_t db = store_get(*(const int *)b)->deadline;
+    return (da > db) - (da < db);          /* earliest (most overdue) first */
+}
+
+/* Fills idx[] with overdue + due-soon assets, most urgent first. Returns how many. */
+static int collect_urgent(int idx[], int *overdue, int *soon)
+{
+    int n = 0;
+    *overdue = *soon = 0;
+    for (int i = 0; i < store_count(); i++) {
+        Urgency u = store_urgency(store_get(i), nowT);
+        if (u == URGENCY_OVERDUE)   { (*overdue)++; idx[n++] = i; }
+        else if (u == URGENCY_SOON) { (*soon)++;    idx[n++] = i; }
+    }
+    qsort(idx, (size_t)n, sizeof(int), cmp_deadline);
+    return n;
+}
+
+static void assistant_hint(const Asset *a, Urgency u, char *buf, size_t n)
+{
+    bool hasPerson = (a->assignedTo[0] != '\0');
+    if (u == URGENCY_OVERDUE) {
+        if (a->status == STATUS_REPAIR)           snprintf(buf, n, "still in repair - chase the repairer");
+        else if (a->status == STATUS_IN_USE && hasPerson)
+                                                  snprintf(buf, n, "ask %s to return it or extend", a->assignedTo);
+        else                                      snprintf(buf, n, "review it and set a new deadline");
+    } else {
+        if (a->status == STATUS_REPAIR)           snprintf(buf, n, "make sure the repair finishes in time");
+        else if (hasPerson)                       snprintf(buf, n, "remind %s", a->assignedTo);
+        else                                      snprintf(buf, n, "plan ahead");
+    }
+}
+
+/* Small red pill in the top-right corner while assets are overdue. Click to dismiss. */
+static void draw_overdue_toast(Rectangle area)
+{
+    int idx[MAX_ASSETS], overdue, soon;
+    collect_urgent(idx, &overdue, &soon);
+    if (overdue < alertDismissedAt) alertDismissedAt = overdue;   /* re-arm if the count drops */
+    if (overdue <= alertDismissedAt) return;
+
+    const char *msg = TextFormat("%d overdue asset%s  (click to dismiss)", overdue, overdue == 1 ? "" : "s");
+    int tw = MeasureText(msg, 18);
+    Rectangle r = { area.x + area.width - (tw + 40), 8, (float)tw + 40, 34 };
+
+    DrawRectangleRounded(r, 0.4f, 8, T.error);
+    DrawCircle((int)r.x + 18, (int)(r.y + 17), 8, WHITE);
+    DrawText("!", (int)r.x + 15, (int)r.y + 9, 18, T.error);
+    DrawText(msg, (int)r.x + 32, (int)r.y + 8, 18, WHITE);
+
+    if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+        alertDismissedAt = overdue;
+}
+
+/* ---------- time travel (testing aid) ----------
+ * The app reads "now" from a simulated clock (simT). It normally runs at real time,
+ * but you can pause it, speed it up, run it backwards, or jump by hours / days to
+ * watch countdowns, warnings and the overdue toast react. Nothing is saved. */
+static void draw_time_travel(void)
+{
+    float x = 10, w = SIDEBAR_W - 20;
+    float top = (float)GetScreenHeight() - 250;
+    DrawRectangleRounded((Rectangle){ x, top - 8, w, 214 }, 0.06f, 8, Fade(WHITE, 0.07f));
+
+    double drift = simT - (double)time(NULL);
+    bool simulated = (speedIdx != SPEED_REAL) || drift > 2.0 || drift < -2.0;
+
+    DrawText("Time travel", (int)x + 8, (int)top, 16, T.muted);
+    if (simulated) DrawText("SIMULATED", (int)(x + w - 8 - MeasureText("SIMULATED", 14)), (int)top + 2, 14, T.warn);
+
+    char stamp[32] = "";
+    time_t t = nowT;
+    struct tm *lt = localtime(&t);
+    if (lt) strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", lt);
+    DrawText(stamp, (int)x + 8, (int)top + 22, 16, WHITE);
+
+    double sp = SPEEDS[speedIdx];
+    const char *speedTxt = (sp == 0) ? "Paused"
+                         : (speedIdx == SPEED_REAL) ? "Real time (1x)"
+                         : TextFormat("Speed: %.0fx%s", sp, sp < 0 ? " (reverse)" : "");
+    DrawText(speedTxt, (int)x + 8, (int)top + 44, 16, simulated ? T.warn : T.muted);
+
+    GuiSetStyle(DEFAULT, TEXT_SIZE, 16);
+
+    float bw3 = (w - 12) / 3.0f, bw2 = (w - 6) / 2.0f;
+    float by = top + 68;
+
+    if (speedIdx == 0) GuiDisable();
+    if (GuiButton((Rectangle){ x, by, bw3, 30 }, "<<")) speedIdx--;
+    GuiEnable();
+
+    if (GuiButton((Rectangle){ x + bw3 + 6, by, bw3, 30 }, speedIdx == SPEED_PAUSED ? ">" : "||"))
+        speedIdx = (speedIdx == SPEED_PAUSED) ? SPEED_REAL : SPEED_PAUSED;
+
+    if (speedIdx == SPEED_COUNT - 1) GuiDisable();
+    if (GuiButton((Rectangle){ x + 2 * (bw3 + 6), by, bw3, 30 }, ">>")) speedIdx++;
+    GuiEnable();
+
+    by = top + 104;
+    if (GuiButton((Rectangle){ x, by, bw2, 30 }, "-1 day"))  simT -= 86400.0;
+    if (GuiButton((Rectangle){ x + bw2 + 6, by, bw2, 30 }, "+1 day")) simT += 86400.0;
+
+    by = top + 140;
+    if (GuiButton((Rectangle){ x, by, bw2, 30 }, "-1 hour"))  simT -= 3600.0;
+    if (GuiButton((Rectangle){ x + bw2 + 6, by, bw2, 30 }, "+1 hour")) simT += 3600.0;
+
+    by = top + 176;
+    if (GuiButton((Rectangle){ x, by, w, 30 }, "Reset to real time")) {
+        simT = (double)time(NULL);
+        speedIdx = SPEED_REAL;
+    }
+
+    GuiSetStyle(DEFAULT, TEXT_SIZE, 20);
+}
+
 /* ---------- sidebar ---------- */
 static void draw_sidebar(void)
 {
@@ -207,7 +354,8 @@ static void draw_sidebar(void)
         }
     }
 
-    DrawText("v0.2", 20, GetScreenHeight() - 30, 10, T.muted);
+    draw_time_travel();
+    DrawText("v0.4", 20, GetScreenHeight() - 30, 10, T.muted);
 }
 
 /* ---------- dashboard ---------- */
@@ -218,24 +366,67 @@ static void draw_dashboard(Rectangle area)
     int counts[STATUS_COUNT] = { 0 };
     for (int i = 0; i < store_count(); i++) counts[store_get(i)->status]++;
 
-    const char *titles[4] = { "Total assets", "In use", "In storage", "In repair" };
-    int values[4] = { store_count(), counts[STATUS_IN_USE], counts[STATUS_IN_STORAGE], counts[STATUS_REPAIR] };
+    int urgent[MAX_ASSETS], overdue, soon;
+    int nUrgent = collect_urgent(urgent, &overdue, &soon);
 
-    float gap = 20.0f;
-    float cardW = (area.width - (3 * gap)) / 4.0f;
+    const char *titles[5] = { "Total assets", "In use", "In storage", "In repair", "Overdue" };
+    int values[5] = { store_count(), counts[STATUS_IN_USE], counts[STATUS_IN_STORAGE], counts[STATUS_REPAIR], overdue };
 
-    for (int i = 0; i < 4; i++) {
+    float gap = 16.0f;
+    float cardW = (area.width - (4 * gap)) / 5.0f;
+
+    for (int i = 0; i < 5; i++) {
         Rectangle c = { area.x + i * (cardW + gap), area.y + 60, cardW, 110 };
         DrawRectangleRounded(c, 0.1f, 8, T.card);
         DrawText(titles[i], (int)c.x + 20, (int)c.y + 20, 20, T.muted);
-        DrawText(TextFormat("%d", values[i]), (int)c.x + 20, (int)c.y + 55, 40, T.accent);
+        Color numCol = (i == 4 && overdue > 0) ? T.error : T.accent;
+        DrawText(TextFormat("%d", values[i]), (int)c.x + 20, (int)c.y + 55, 40, numCol);
+    }
+
+    /* --- Deadline Assistant --- */
+    int withDeadline = 0;
+    for (int i = 0; i < store_count(); i++) if (store_get(i)->deadline) withDeadline++;
+
+    Rectangle banner = { area.x, area.y + 184, area.width, 114 };
+    DrawRectangleRounded(banner, 0.08f, 8, T.card);
+
+    Color tone = overdue > 0 ? T.error : (soon > 0 ? T.warn : STATUS_COLORS[STATUS_IN_USE]);
+    DrawRectangle((int)banner.x, (int)banner.y + 8, 5, (int)banner.height - 16, tone);
+
+    float bx = banner.x + 22, bw = banner.width - 44;
+    DrawText("Deadline Assistant", (int)bx, (int)banner.y + 10, 16, T.muted);
+
+    if (withDeadline == 0) {
+        DrawText("No deadlines set yet. Edit an asset and add one to get reminders.",
+                 (int)bx, (int)banner.y + 34, 18, T.text);
+    } else if (nUrgent == 0) {
+        DrawText(TextFormat("All clear - nothing overdue or due within %d days.", DEADLINE_SOON_DAYS),
+                 (int)bx, (int)banner.y + 34, 20, tone);
+    } else {
+        draw_text_fit(TextFormat("%d overdue, %d due within %d days", overdue, soon, DEADLINE_SOON_DAYS),
+                      bx, banner.y + 30, bw, 20, tone);
+
+        int shown = nUrgent < 3 ? nUrgent : 3;
+        for (int i = 0; i < shown; i++) {
+            Asset *a = store_get(urgent[i]);
+            Urgency u = store_urgency(a, nowT);
+            char cd[48], hint[96], line[256];
+            store_countdown_text(a, nowT, cd, sizeof(cd));
+            assistant_hint(a, u, hint, sizeof(hint));
+            snprintf(line, sizeof(line), "%s: %s - %s", a->name, cd, hint);
+            DrawCircle((int)bx + 4, (int)banner.y + 66 + i * 18, 4, urgency_color(u));
+            draw_text_fit(line, bx + 16, banner.y + 58 + i * 18, bw - 16, 16, T.text);
+        }
+        if (nUrgent > shown)
+            DrawText(TextFormat("+%d more", nUrgent - shown), (int)(banner.x + banner.width - 90),
+                     (int)banner.y + 10, 16, T.muted);
     }
 
     /* --- Recent Additions Section --- */
-    float sectionY = area.y + 195;
+    float sectionY = area.y + 312;
     DrawText("Recent Additions", (int)area.x, (int)sectionY, 22, T.text);
 
-    Rectangle recentPanel = { area.x, sectionY + 35, area.width, 210 };
+    Rectangle recentPanel = { area.x, sectionY + 35, area.width, 195 };
     DrawRectangleRounded(recentPanel, 0.04f, 8, T.card);
 
     int total = store_count();
@@ -300,6 +491,7 @@ static void draw_assets(Rectangle area)
         if (a) {
             reset_draft();
             draft = *a;               /* copy so Cancel leaves the original untouched */
+            store_format_date(a->deadline, deadlineBuf, sizeof(deadlineBuf));
             editingId = a->id;
             currentScreen = SCREEN_EDIT_ASSET;
             return;
@@ -315,22 +507,25 @@ static void draw_assets(Rectangle area)
     Rectangle table = { area.x, toolbarY + 52, area.width, area.height - (toolbarY + 52 - area.y) };
     Rectangle body  = { table.x, table.y + ROW_H, table.width, table.height - ROW_H };
 
-    float colW[5];
-    colW[0] = 60;
-    colW[1] = table.width * 0.32f;
-    colW[2] = table.width * 0.16f;
-    colW[3] = table.width * 0.22f;
-    colW[4] = table.width - colW[0] - colW[1] - colW[2] - colW[3];
+    enum { COLS = 7 };
+    float colW[COLS];
+    colW[0] = 50;
+    colW[1] = table.width * 0.20f;
+    colW[2] = table.width * 0.11f;
+    colW[3] = table.width * 0.15f;
+    colW[4] = table.width * 0.11f;
+    colW[5] = table.width * 0.13f;
+    colW[6] = table.width - colW[0] - colW[1] - colW[2] - colW[3] - colW[4] - colW[5];
 
-    float colX[5];
+    float colX[COLS];
     colX[0] = table.x;
-    for (int i = 1; i < 5; i++) colX[i] = colX[i - 1] + colW[i - 1];
-    const char *headers[5] = { "ID", "Name", "Category", "Assigned to", "Status" };
+    for (int i = 1; i < COLS; i++) colX[i] = colX[i - 1] + colW[i - 1];
+    const char *headers[COLS] = { "ID", "Name", "Category", "Assigned to", "Status", "Deadline", "Countdown" };
 
     /* header */
     DrawRectangle((int)table.x, (int)table.y, (int)table.width, ROW_H, T.sidebar);
-    for (int i = 0; i < 5; i++)
-        DrawText(headers[i], (int)colX[i] + 12, (int)table.y + 10, 20, WHITE);
+    for (int i = 0; i < COLS; i++)
+        draw_text_fit(headers[i], colX[i] + 12, table.y + 11, colW[i] - 16, 18, WHITE);
 
     /* rows that match the search */
     int rows[MAX_ASSETS];
@@ -360,15 +555,28 @@ static void draw_assets(Rectangle area)
         if (a->id == selectedId)  DrawRectangleRec(row, T.rowSel);
         else if (k % 2 == 1)      DrawRectangleRec(row, T.rowAlt);
 
+        Urgency urg = store_urgency(a, nowT);
+        if (a->id != selectedId) {            /* tint rows that need attention */
+            if (urg == URGENCY_OVERDUE)   DrawRectangleRec(row, Fade(T.error, 0.14f));
+            else if (urg == URGENCY_SOON) DrawRectangleRec(row, Fade(T.warn, 0.12f));
+        }
+
         if (overBody && CheckCollisionPointRec(mouse, row) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             selectedId = a->id;
 
-        int ty = (int)y + 10;
-        DrawText(TextFormat("%d", a->id), (int)colX[0] + 12, ty, 20, T.muted);
-        draw_text_fit(a->name,       colX[1] + 12, (float)ty, colW[1] - 20, 20, T.text);
-        draw_text_fit(a->category,   colX[2] + 12, (float)ty, colW[2] - 20, 20, T.text);
-        draw_text_fit(a->assignedTo, colX[3] + 12, (float)ty, colW[3] - 20, 20, T.text);
-        DrawText(STATUS_NAME(a->status), (int)colX[4] + 12, ty, 20, STATUS_COLORS[a->status]);
+        int ty = (int)y + 11;
+        char due[16], cd[48];
+        store_format_date(a->deadline, due, sizeof(due));
+        store_countdown_text(a, nowT, cd, sizeof(cd));
+
+        DrawText(TextFormat("%d", a->id), (int)colX[0] + 12, ty, 18, T.muted);
+        draw_text_fit(a->name,       colX[1] + 12, (float)ty, colW[1] - 16, 18, T.text);
+        draw_text_fit(a->category,   colX[2] + 12, (float)ty, colW[2] - 16, 18, T.text);
+        draw_text_fit(a->assignedTo, colX[3] + 12, (float)ty, colW[3] - 16, 18, T.text);
+        draw_text_fit(STATUS_NAME(a->status), colX[4] + 12, (float)ty, colW[4] - 16, 18, STATUS_COLORS[a->status]);
+        draw_text_fit(due[0] ? due : "-", colX[5] + 12, (float)ty, colW[5] - 16, 18, T.text);
+        draw_text_fit(cd, colX[6] + 12, (float)ty, colW[6] - 16, 18,
+                      urg == URGENCY_NONE ? T.muted : urgency_color(urg));
     }
     EndScissorMode();
 
@@ -383,7 +591,7 @@ static void draw_asset_form(Rectangle area)
     DrawText(editing ? "Edit Asset" : "Add Asset", (int)area.x, (int)area.y, 30, T.text);
 
     float cardW = area.width < 600 ? area.width : 600;
-    Rectangle card = { area.x, area.y + 60, cardW, 440 };
+    Rectangle card = { area.x, area.y + 60, cardW, 470 };
     DrawRectangleRounded(card, 0.04f, 8, T.card);
 
     float x = card.x + 24;
@@ -394,21 +602,38 @@ static void draw_asset_form(Rectangle area)
         { "Name",        draft.name,       NAME_LEN  },
         { "Category",    draft.category,   SHORT_LEN },
         { "Assigned to", draft.assignedTo, SHORT_LEN },
+        { "Deadline (YYYY-MM-DD, optional)", deadlineBuf, (int)sizeof(deadlineBuf) },
     };
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         DrawText(fields[i].label, (int)x, (int)y, 20, T.muted);
         Rectangle box = { x, y + 26, w, 36 };
         if (GuiTextBox(box, fields[i].buf, fields[i].size, activeField == i))
             activeField = (activeField == i) ? -1 : i;
-        y += 82;
+
+        if (i == 3) {   /* live preview of what the typed date means */
+            time_t t;
+            if (deadlineBuf[0] == '\0') {
+                if (activeField != 3)
+                    DrawText("e.g. 2026-12-31", (int)box.x + 10, (int)box.y + 8, 20, T.muted);
+            } else if (store_parse_date(deadlineBuf, &t)) {
+                Asset tmp;
+                memset(&tmp, 0, sizeof(tmp));
+                tmp.deadline = t;
+                char cd[48];
+                store_countdown_text(&tmp, nowT, cd, sizeof(cd));
+                Urgency u = store_urgency(&tmp, nowT);
+                DrawText(cd, (int)(x + w - MeasureText(cd, 18)), (int)y + 2, 18, urgency_color(u));
+            }
+        }
+        y += 74;
     }
 
     DrawText("Status", (int)x, (int)y, 20, T.muted);
     Rectangle statusBtn = { x, y + 26, w, 36 };
     if (GuiButton(statusBtn, TextFormat("%s   (click to change)", STATUS_NAME(draft.status))))
         draft.status = (AssetStatus)((draft.status + 1) % STATUS_COUNT);
-    y += 82;
+    y += 74;
 
     if (formError[0] != '\0')
         DrawText(formError, (int)x, (int)y - 12, 20, T.error);
@@ -417,9 +642,13 @@ static void draw_asset_form(Rectangle area)
     Rectangle cancelBtn = { x + 156, y + 8, 140, 40 };
 
     if (GuiButton(saveBtn, editing ? "Save changes" : "Save")) {
+        time_t due = 0;
         if (draft.name[0] == '\0') {
             snprintf(formError, sizeof(formError), "Name is required.");
+        } else if (deadlineBuf[0] != '\0' && !store_parse_date(deadlineBuf, &due)) {
+            snprintf(formError, sizeof(formError), "Deadline must be a valid date (YYYY-MM-DD).");
         } else {
+            draft.deadline = due;              /* 0 when the box was left empty */
             if (editing) {
                 store_update(&draft);          /* draft.id is still the original id */
             } else if (store_add(&draft) < 0) {
@@ -517,10 +746,16 @@ void ui_init(void)
     store_init();                           /* loads the CSV, or seeds sample data on first run */
     strncpy(dbPathBuf, store_get_path(), PATH_LEN - 1);
     reset_draft();
+    simT = (double)time(NULL);
+    speedIdx = SPEED_REAL;
 }
 
 void ui_update_and_draw(void)
 {
+    simT += (double)GetFrameTime() * SPEEDS[speedIdx];   /* advance the (possibly simulated) clock */
+    if (simT < 946684800.0)  simT = 946684800.0;         /* keep within 2000 .. 2100 */
+    if (simT > 4102444800.0) simT = 4102444800.0;
+    nowT = (time_t)simT;
     ClearBackground(T.bg);
 
     Rectangle area = {
@@ -538,5 +773,6 @@ void ui_update_and_draw(void)
         case SCREEN_SETTINGS:   draw_settings(area);    break;
     }
 
+    draw_overdue_toast(area);
     draw_sidebar();   /* drawn last so a screen switch never clicks through */
 }
