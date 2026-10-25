@@ -115,6 +115,9 @@ static Asset draft;
 static int   editingId      = -1;      /* -1 = adding a new asset, otherwise the id being edited */
 static int   activeField    = -1;
 static char  formError[64]  = "";
+static int   catIndex       = 0;       /* selected entry in the category dropdown */
+static bool  catOpen        = false;   /* dropdown list is open */
+static char  catList[256]   = "";      /* "Laptop;Printer;..." built in ui_init() */
 static char  deadlineBuf[16] = "";     /* "YYYY-MM-DD" text box in the form */
 
 /* deadlines */
@@ -145,6 +148,8 @@ static void reset_draft(void)
     activeField = -1;
     formError[0] = '\0';
     deadlineBuf[0] = '\0';
+    catIndex = 0;
+    catOpen = false;
 }
 
 /* Saves to the current database file. Call after every add / edit / delete. */
@@ -354,6 +359,7 @@ static void draw_sidebar(void)
         if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
             currentScreen = items[i].screen;
             activeField = -1;
+            catOpen = false;
             searchEditing = false;
             dbEditing = exportEditing = false;
         }
@@ -471,7 +477,7 @@ static void draw_dashboard(Rectangle area)
 /* --- warehouse dimensions (world units) --- */
 #define BOX_SIZE   0.75f
 #define BAY_W      1.05f                 /* width of one shelf bay */
-#define BAYS_PER_RACK 8                  /* bays along one rack */
+#define BAYS_PER_RACK 4                  /* bays along one rack */
 #define RACK_LEN   (BAYS_PER_RACK * BAY_W)
 #define RACK_D     1.1f
 #define LEVEL_H    1.3f                  /* 3 shelf levels */
@@ -481,10 +487,13 @@ static void draw_dashboard(Rectangle area)
 #define ROW_GAP    2.8f                  /* aisle between rows of racks */
 #define MARGIN     1.0f
 #define ROW0_Z     1.3f
-#define RACK_ROWS  6
+#define RACK_ROWS  6                     /* rows of racks, front to back */
+#define RACK_COLS  6                     /* racks per row: 3 left of the central aisle, 3 right */
+#define GROUP_COLS 3                     /* racks form a 3 x 3 grid of category groups (2 x 2 racks each) */
 #define PER_RACK   (3 * BAYS_PER_RACK)
-#define SLOT_COUNT (RACK_ROWS * 2 * PER_RACK)
-#define WH_W       (2 * MARGIN + 2 * RACK_LEN + AISLE_W)
+#define GROUP_SLOTS (4 * PER_RACK)       /* shelf slots reserved for ONE category (4 racks) */
+#define SLOT_COUNT (CATEGORY_COUNT * GROUP_SLOTS)
+#define WH_W       (2 * MARGIN + RACK_COLS * RACK_LEN + AISLE_W)
 #define WH_D       (ROW0_Z + RACK_ROWS * RACK_D + (RACK_ROWS - 1) * ROW_GAP + ROW_GAP)
 #define DOOR_X     (WH_W / 2)            /* loading door in the front wall (z = WH_D) */
 #define DOOR_W     3.4f
@@ -551,15 +560,38 @@ static void draw_box(Vector3 c, float sx, float sy, float sz, Color col)
 /* ---- shelf slots ----
  * Every asset lives in a fixed shelf slot, so boxes never shuffle around when something is
  * added or deleted. Slots are handed out in order: rack by rack, bottom shelf first. */
+static const Color CAT_COLORS[CATEGORY_COUNT] = {
+    {  59, 130, 246, 255 }, { 249, 115,  22, 255 }, {  20, 184, 166, 255 },
+    { 168,  85, 247, 255 }, { 236,  72, 153, 255 }, { 202, 138,   4, 255 },
+    {  34, 197,  94, 255 }, { 239,  68,  68, 255 }, { 100, 116, 139, 255 }
+};
+
+static float rack_x0(int col)            /* left edge of rack column 0..5 (the central aisle sits after column 2) */
+{
+    return MARGIN + col * RACK_LEN + (col >= RACK_COLS / 2 ? AISLE_W : 0.0f);
+}
+
+static float rack_z0(int row) { return ROW0_Z + row * (RACK_D + ROW_GAP); }
+
+/* Middle of a category's group of racks, up in the air above the shelves (for its sign). */
+static Vector3 group_center(int g)
+{
+    int gc = g % GROUP_COLS, gr = g / GROUP_COLS;
+    float xa = rack_x0(2 * gc), xb = rack_x0(2 * gc + 1) + RACK_LEN;
+    float za = rack_z0(2 * gr), zb = rack_z0(2 * gr + 1) + RACK_D;
+    return (Vector3){ (xa + xb) / 2, RACK_H + 0.4f, (za + zb) / 2 };
+}
+
 typedef struct { Vector3 pos; float pickX, pickZ; } SlotInfo;   /* pos = bottom centre of the box */
 
 static SlotInfo slot_info(int slot)
 {
-    int rack = slot / PER_RACK, inRack = slot % PER_RACK;
-    int row = rack / 2, side = rack % 2;
+    int g = slot / GROUP_SLOTS, local = slot % GROUP_SLOTS;          /* g = category index */
+    int rk = local / PER_RACK, inRack = local % PER_RACK;            /* which of the group's 4 racks */
+    int col = (g % GROUP_COLS) * 2 + (rk % 2);
+    int row = (g / GROUP_COLS) * 2 + (rk / 2);
     int level = inRack / BAYS_PER_RACK, bay = inRack % BAYS_PER_RACK;
-    float x0 = MARGIN + side * (RACK_LEN + AISLE_W);
-    float z0 = ROW0_Z + row * (RACK_D + ROW_GAP);
+    float x0 = rack_x0(col), z0 = rack_z0(row);
 
     SlotInfo si;
     si.pos   = (Vector3){ x0 + (bay + 0.5f) * BAY_W, PLANK_T + level * LEVEL_H, z0 + RACK_D / 2 };
@@ -687,13 +719,20 @@ static bool slot_held(int slot)
 /* Frees slots of deleted assets and gives new assets a slot. */
 static void sync_slots(void)
 {
-    for (int s = 0; s < SLOT_COUNT; s++)
-        if (slotId[s] != 0 && !store_find_by_id(slotId[s]) && !slot_held(s)) slotId[s] = 0;
+    /* free slots of deleted assets, and of assets whose category changed (they move to the new group) */
+    for (int s = 0; s < SLOT_COUNT; s++) {
+        if (slotId[s] == 0 || slot_held(s)) continue;
+        const Asset *a = store_find_by_id(slotId[s]);
+        if (!a || store_category_index(a->category) != s / GROUP_SLOTS) slotId[s] = 0;
+    }
 
+    /* every asset goes on a shelf belonging to its own category */
     for (int i = 0; i < store_count(); i++) {
-        int id = store_get(i)->id;
-        if (slot_of(id) >= 0) continue;
-        for (int s = 0; s < SLOT_COUNT; s++) if (slotId[s] == 0) { slotId[s] = id; break; }
+        const Asset *a = store_get(i);
+        if (slot_of(a->id) >= 0) continue;
+        int g = store_category_index(a->category);
+        for (int s = g * GROUP_SLOTS; s < (g + 1) * GROUP_SLOTS; s++)
+            if (slotId[s] == 0) { slotId[s] = a->id; break; }
     }
 }
 
@@ -1080,21 +1119,26 @@ static void draw_warehouse(Vector3 cam)
     draw_box((Vector3){ DOOR_X - AISLE_W / 2, 0.01f, WH_D / 2 }, 0.08f, 0.02f, WH_D - 0.4f, yellow);
     draw_box((Vector3){ DOOR_X + AISLE_W / 2, 0.01f, WH_D / 2 }, 0.08f, 0.02f, WH_D - 0.4f, yellow);
 
-    /* shelving racks: blue uprights, orange beams, wooden shelf boards */
-    for (int rack = 0; rack < RACK_ROWS * 2; rack++) {
-        int row = rack / 2, side = rack % 2;
-        float x0 = MARGIN + side * (RACK_LEN + AISLE_W);
-        float z0 = ROW0_Z + row * (RACK_D + ROW_GAP);
+    /* shelving racks: blue uprights, orange beams, wooden shelf boards.
+     * The floor under each rack is tinted with the colour of the category that owns it. */
+    for (int row = 0; row < RACK_ROWS; row++) {
+        for (int col = 0; col < RACK_COLS; col++) {
+            float x0 = rack_x0(col), z0 = rack_z0(row);
+            int   g  = (row / 2) * GROUP_COLS + (col / 2);
 
-        for (int k = 0; k <= BAYS_PER_RACK; k++) {
-            draw_box((Vector3){ x0 + k * BAY_W, RACK_H / 2, z0 + 0.06f }, 0.1f, RACK_H, 0.1f, upright);
-            draw_box((Vector3){ x0 + k * BAY_W, RACK_H / 2, z0 + RACK_D - 0.06f }, 0.1f, RACK_H, 0.1f, upright);
-        }
-        for (int level = 0; level < 3; level++) {
-            float y = level * LEVEL_H;
-            draw_box((Vector3){ x0 + RACK_LEN / 2, y + PLANK_T / 2, z0 + RACK_D / 2 }, RACK_LEN, PLANK_T, RACK_D, plank);
-            draw_box((Vector3){ x0 + RACK_LEN / 2, y + 0.1f, z0 + 0.04f }, RACK_LEN, 0.12f, 0.05f, beam);
-            draw_box((Vector3){ x0 + RACK_LEN / 2, y + 0.1f, z0 + RACK_D - 0.04f }, RACK_LEN, 0.12f, 0.05f, beam);
+            draw_box((Vector3){ x0 + RACK_LEN / 2, 0.01f, z0 - 0.1f + (RACK_D + 2.0f) / 2 },
+                     RACK_LEN + 0.2f, 0.02f, RACK_D + 2.0f, mix(CAT_COLORS[g], floorC, 0.55f));
+
+            for (int k = 0; k <= BAYS_PER_RACK; k++) {
+                draw_box((Vector3){ x0 + k * BAY_W, RACK_H / 2, z0 + 0.06f }, 0.1f, RACK_H, 0.1f, upright);
+                draw_box((Vector3){ x0 + k * BAY_W, RACK_H / 2, z0 + RACK_D - 0.06f }, 0.1f, RACK_H, 0.1f, upright);
+            }
+            for (int level = 0; level < 3; level++) {
+                float y = level * LEVEL_H;
+                draw_box((Vector3){ x0 + RACK_LEN / 2, y + PLANK_T / 2, z0 + RACK_D / 2 }, RACK_LEN, PLANK_T, RACK_D, plank);
+                draw_box((Vector3){ x0 + RACK_LEN / 2, y + 0.1f, z0 + 0.04f }, RACK_LEN, 0.12f, 0.05f, beam);
+                draw_box((Vector3){ x0 + RACK_LEN / 2, y + 0.1f, z0 + RACK_D - 0.04f }, RACK_LEN, 0.12f, 0.05f, beam);
+            }
         }
     }
 
@@ -1203,7 +1247,7 @@ static void draw_assets_3d(Rectangle view)
     walkers_update(GetFrameTime());
 
     Vector3 center = { DOOR_X, 1.2f, WH_D / 2.0f - 1.0f };
-    if (camDist <= 0.0f) camDist = 42.0f;
+    if (camDist <= 0.0f) camDist = 50.0f;
 
     /* which box lives in which slot, and is it on its shelf yet? */
     int  idxSlot[MAX_ASSETS];
@@ -1346,6 +1390,25 @@ static void draw_assets_3d(Rectangle view)
         }
     }
 
+    /* category signs above each group of shelves, with how full the group is */
+    int counts[CATEGORY_COUNT] = { 0 };
+    int unplaced = 0;
+    for (int i = 0; i < n; i++) {
+        counts[store_category_index(store_get(i)->category)]++;
+        if (idxSlot[i] < 0) unplaced++;
+    }
+    for (int g = 0; g < CATEGORY_COUNT; g++) {
+        Vector2 sp = GetWorldToScreenEx(group_center(g), cam, w, h);
+        const char *txt = TextFormat("%s  %d/%d", store_category_name(g), counts[g], GROUP_SLOTS);
+        int tw = MeasureText(txt, 16);
+        Rectangle r = { view.x + sp.x - tw / 2 - 10, view.y + sp.y - 13, (float)tw + 20, 26 };
+        DrawRectangleRounded(r, 0.4f, 8, CAT_COLORS[g]);
+        DrawText(txt, (int)r.x + 10, (int)r.y + 5, 16, WHITE);
+    }
+    if (unplaced > 0)
+        DrawText(TextFormat("%d asset%s no shelf space (category full)", unplaced, unplaced == 1 ? " has" : "s have"),
+                 (int)view.x + 14, (int)view.y + 52, 16, T.error);
+
     if (n == 0)
         DrawText("The warehouse is empty - add an asset and a truck will deliver it.",
                  (int)view.x + 20, (int)view.y + 60, 18, T.muted);
@@ -1447,6 +1510,7 @@ static void draw_assets(Rectangle area)
             draft = *a;               /* copy so Cancel leaves the original untouched */
             store_format_date(a->deadline, deadlineBuf, sizeof(deadlineBuf));
             editingId = a->id;
+            catIndex = store_category_index(a->category);
             currentScreen = SCREEN_EDIT_ASSET;
             return;
         }
@@ -1557,6 +1621,10 @@ static void draw_asset_form(Rectangle area)
     float w = card.width - 48;
     float y = card.y + 24;
 
+    bool locked = catOpen;                  /* while the dropdown list is open, the widgets under it ignore the mouse */
+    if (locked) GuiLock();
+
+    Rectangle catBox = { 0 };
     struct { const char *label; char *buf; int size; } fields[] = {
         { "Name",        draft.name,       NAME_LEN  },
         { "Category",    draft.category,   SHORT_LEN },
@@ -1567,6 +1635,13 @@ static void draw_asset_form(Rectangle area)
     for (int i = 0; i < 4; i++) {
         DrawText(fields[i].label, (int)x, (int)y, 20, T.muted);
         Rectangle box = { x, y + 26, w, 36 };
+
+        if (i == 1) {                       /* category is a dropdown, drawn last so its list sits on top */
+            catBox = box;
+            y += 74;
+            continue;
+        }
+
         if (GuiTextBox(box, fields[i].buf, fields[i].size, activeField == i))
             activeField = (activeField == i) ? -1 : i;
 
@@ -1602,30 +1677,49 @@ static void draw_asset_form(Rectangle area)
 
     if (GuiButton(saveBtn, editing ? "Save changes" : "Save")) {
         time_t due = 0;
+
+        int used = 0;                       /* how many other assets already sit on this category's shelves */
+        for (int i = 0; i < store_count(); i++) {
+            const Asset *o = store_get(i);
+            if (o->id != editingId && store_category_index(o->category) == catIndex) used++;
+        }
+
         if (draft.name[0] == '\0') {
             snprintf(formError, sizeof(formError), "Name is required.");
         } else if (deadlineBuf[0] != '\0' && !store_parse_date(deadlineBuf, &due)) {
             snprintf(formError, sizeof(formError), "Deadline must be a valid date (YYYY-MM-DD).");
+        } else if (used >= GROUP_SLOTS) {
+            snprintf(formError, sizeof(formError), "%s shelves are full (%d).", store_category_name(catIndex), GROUP_SLOTS);
         } else {
             draft.deadline = due;              /* 0 when the box was left empty */
+            strncpy(draft.category, store_category_name(catIndex), SHORT_LEN - 1);
+            draft.category[SHORT_LEN - 1] = '\0';
+
+            bool ok = true;
             if (editing) {
                 store_update(&draft);          /* draft.id is still the original id */
             } else {
                 int newId = store_add(&draft);
                 if (newId < 0) {
                     snprintf(formError, sizeof(formError), "Asset list is full (%d).", MAX_ASSETS);
-                    return;
+                    ok = false;
+                } else {
+                    anim_queue_delivery(newId);    /* 3D view: a truck brings it in */
                 }
-                anim_queue_delivery(newId);    /* 3D view: a truck brings it in */
             }
-            persist();
-            reset_draft();
-            currentScreen = SCREEN_ASSETS;
+            if (ok) {
+                persist();
+                reset_draft();
+                currentScreen = SCREEN_ASSETS;
+            }
         }
     } else if (GuiButton(cancelBtn, "Cancel")) {
         reset_draft();
         currentScreen = SCREEN_ASSETS;
     }
+
+    if (locked) GuiUnlock();
+    if (GuiDropdownBox(catBox, catList, &catIndex, catOpen)) catOpen = !catOpen;
 }
 
 /* ---------- settings ---------- */
@@ -1737,6 +1831,11 @@ static void draw_delete_modal(void)
 void ui_init(void)
 {
     GuiSetStyle(DEFAULT, TEXT_SIZE, 20);   /* default font looks sharpest at multiples of 10 */
+    catList[0] = '\0';                      /* "Laptop;Printer;..." for the category dropdown */
+    for (int i = 0; i < CATEGORY_COUNT; i++) {
+        if (i > 0) strcat(catList, ";");
+        strcat(catList, store_category_name(i));
+    }
     apply_theme(false);
     store_init();                           /* loads the CSV, or seeds sample data on first run */
     strncpy(dbPathBuf, store_get_path(), PATH_LEN - 1);

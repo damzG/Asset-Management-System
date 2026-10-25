@@ -27,6 +27,11 @@ bool        store_export_csv(const char *path); /* human-readable report (status
 
 const char *store_status_name(AssetStatus s);
 
+/* ---- Categories (fixed list, chosen from a dropdown) ---- */
+#define CATEGORY_COUNT 9                      /* the last one is "Other" */
+const char *store_category_name(int index);   /* "Laptop", "Printer", ... */
+int         store_category_index(const char *name); /* case-insensitive; unknown names map to "Other" */
+
 /* ---- Deadlines ---- */
 typedef enum {
     URGENCY_NONE = 0,   /* no deadline set */

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <time.h>
+#include <ctype.h>
 
 static Asset assets[MAX_ASSETS];
 static int   count  = 0;
@@ -20,6 +21,43 @@ static const char *STATUS_NAMES[STATUS_COUNT] = { "In use", "In storage", "In re
 const char *store_status_name(AssetStatus s)
 {
     return (s >= 0 && s < STATUS_COUNT) ? STATUS_NAMES[s] : "Unknown";
+}
+
+static const char *CATEGORY_NAMES[CATEGORY_COUNT] = {
+    "Computers", "Electronics", "Office Equipment", "Furniture", "Tools", "Vehicles", "Appliances", "Supplies", "Other"
+};
+
+const char *store_category_name(int index)
+{
+    return (index >= 0 && index < CATEGORY_COUNT) ? CATEGORY_NAMES[index] : "Other";
+}
+
+static bool same_text(const char *a, const char *b)     /* case-insensitive equality */
+{
+    while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) { a++; b++; }
+    return *a == '\0' && *b == '\0';
+}
+
+/* Older files used more specific names; map them onto the general categories. */
+static const struct { const char *name; int index; } LEGACY_CATEGORIES[] = {
+    { "Laptop", 0 }, { "Tablet", 0 }, { "Monitor", 0 },
+    { "Network", 1 }, { "Peripheral", 1 }, { "AV", 1 },
+    { "Printer", 2 }
+};
+
+static int category_lookup(const char *name)           /* -1 if the name is not on the list */
+{
+    for (int i = 0; i < CATEGORY_COUNT - 1; i++)
+        if (same_text(name, CATEGORY_NAMES[i])) return i;
+    for (size_t i = 0; i < sizeof(LEGACY_CATEGORIES) / sizeof(LEGACY_CATEGORIES[0]); i++)
+        if (same_text(name, LEGACY_CATEGORIES[i].name)) return LEGACY_CATEGORIES[i].index;
+    return -1;
+}
+
+int store_category_index(const char *name)
+{
+    int i = category_lookup(name);
+    return (i >= 0) ? i : CATEGORY_COUNT - 1;          /* anything not on the list goes under "Other" */
 }
 
 /* ---------- basic access ---------- */
@@ -153,19 +191,21 @@ void store_init_placeholder(void)
 {
     count = 0;
     nextId = 1;
-    seed("Dell Latitude 5440 Laptop", "Laptop",    "Aoife Murphy", STATUS_IN_USE,     14);
-    seed("HP LaserJet Pro M404",      "Printer",   "Front Office", STATUS_IN_USE,     -2);
-    seed("Samsung 27in Monitor",      "Monitor",   "",             STATUS_IN_STORAGE, NO_DEADLINE);
-    seed("Cisco Catalyst Switch",     "Network",   "Server Room",  STATUS_IN_USE,      2);
-    seed("iPad Air (10.9in)",         "Tablet",    "Sean Kelly",   STATUS_REPAIR,     -5);
-    seed("Logitech Webcam C920",      "Peripheral","",             STATUS_IN_STORAGE, NO_DEADLINE);
-    seed("Office Desk (Standing)",    "Furniture", "Niamh Byrne",  STATUS_IN_USE,     30);
-    seed("Projector Epson EB-X49",    "AV",        "",             STATUS_IN_STORAGE,  0);
-    seed("Lenovo ThinkPad X1 Carbon", "Laptop",    "Declan Walsh", STATUS_IN_USE,     -9);
-    seed("Zebra ZD421 Label Printer", "Printer",   "Warehouse",    STATUS_REPAIR,      1);
-    seed("Meeting Room TV 55in",      "AV",        "Boardroom",    STATUS_IN_USE,      7);
-    seed("Ubiquiti WiFi Access Point","Network",   "",             STATUS_IN_STORAGE, -1);
-    seed("Poly Conference Phone",     "Peripheral","Ciara Doyle",  STATUS_IN_USE,      3);
+    seed("Dell Latitude 5440 Laptop", "Computers",        "Aoife Murphy", STATUS_IN_USE,     14);
+    seed("HP LaserJet Pro M404",      "Office Equipment", "Front Office", STATUS_IN_USE,     -2);
+    seed("Samsung 27in Monitor",      "Computers",        "",             STATUS_IN_STORAGE, NO_DEADLINE);
+    seed("Cisco Catalyst Switch",     "Electronics",      "Server Room",  STATUS_IN_USE,      2);
+    seed("iPad Air (10.9in)",         "Computers",        "Sean Kelly",   STATUS_REPAIR,     -5);
+    seed("Logitech Webcam C920",      "Electronics",      "",             STATUS_IN_STORAGE, NO_DEADLINE);
+    seed("Office Desk (Standing)",    "Furniture",        "Niamh Byrne",  STATUS_IN_USE,     30);
+    seed("Projector Epson EB-X49",    "Electronics",      "",             STATUS_IN_STORAGE,  0);
+    seed("Lenovo ThinkPad X1 Carbon", "Computers",        "Declan Walsh", STATUS_IN_USE,     -9);
+    seed("Zebra ZD421 Label Printer", "Office Equipment", "Warehouse",    STATUS_REPAIR,      1);
+    seed("Meeting Room TV 55in",      "Electronics",      "Boardroom",    STATUS_IN_USE,      7);
+    seed("Cordless Drill Set",        "Tools",            "Maintenance",  STATUS_IN_USE,     12);
+    seed("Delivery Van",              "Vehicles",         "Logistics",    STATUS_IN_USE,      5);
+    seed("Staff Room Coffee Machine", "Appliances",       "Staff Room",   STATUS_IN_USE,     NO_DEADLINE);
+    seed("A4 Paper (10 boxes)",       "Supplies",         "",             STATUS_IN_STORAGE, NO_DEADLINE);
 }
 
 void store_init(void)
@@ -296,7 +336,8 @@ bool store_load(const char *path)
         memset(&a, 0, sizeof(a));
         a.id = id;
         strncpy(a.name,       fields[1], NAME_LEN - 1);
-        strncpy(a.category,   fields[2], SHORT_LEN - 1);
+        int ci = category_lookup(fields[2]);      /* old names like "Laptop" become "Computers" */
+        strncpy(a.category,   ci >= 0 ? CATEGORY_NAMES[ci] : fields[2], SHORT_LEN - 1);
         strncpy(a.assignedTo, fields[3], SHORT_LEN - 1);
         int st = atoi(fields[4]);
         a.status = (st >= 0 && st < STATUS_COUNT) ? (AssetStatus)st : STATUS_IN_STORAGE;
